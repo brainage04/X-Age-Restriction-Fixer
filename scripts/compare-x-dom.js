@@ -78,6 +78,141 @@ async function closeTarget(id) {
   await fetch(`http://127.0.0.1:${PORT}/json/close/${id}`).catch(() => {});
 }
 
+async function evaluate(Runtime, expression) {
+  const result = await Runtime.evaluate({
+    expression,
+    awaitPromise: true,
+    returnByValue: true
+  });
+
+  if (result.exceptionDetails) {
+    throw new Error(result.exceptionDetails.text || "Runtime evaluation failed.");
+  }
+
+  return result.result.value;
+}
+
+function pageCallExpression(fn, args) {
+  const serializedArgs = args.map((arg) => JSON.stringify(arg)).join(",");
+  return `(${fn.toString()})(${serializedArgs})`;
+}
+
+async function runInPage(Runtime, fn, ...args) {
+  return evaluate(Runtime, pageCallExpression(fn, args));
+}
+
+function snapshotPage(label) {
+  const statusId = location.pathname.match(/\/status\/(\d+)/)?.[1] || "";
+
+  function pathFor(node) {
+    const parts = [];
+    let current = node;
+
+    while (current && current.nodeType === 1 && parts.length < 14) {
+      const parent = current.parentElement;
+      const index = parent ? Array.from(parent.children).indexOf(current) + 1 : 1;
+      const testId = current.getAttribute("data-testid");
+      const id = current.id;
+      const tag = current.tagName.toLowerCase();
+      let selector = `${tag}:nth-child(${index})`;
+
+      if (testId) {
+        selector = `${tag}[data-testid=${testId}]`;
+      }
+
+      if (id) {
+        selector = `${tag}#${id}`;
+      }
+
+      parts.unshift(selector);
+      current = parent;
+    }
+
+    return parts.join(" > ");
+  }
+
+  function box(node) {
+    const rect = node.getBoundingClientRect();
+
+    return {
+      x: Math.round(rect.x),
+      y: Math.round(rect.y),
+      w: Math.round(rect.width),
+      h: Math.round(rect.height)
+    };
+  }
+
+  function styleFor(node) {
+    const style = getComputedStyle(node);
+
+    return {
+      display: style.display,
+      position: style.position,
+      overflow: style.overflow,
+      borderRadius: style.borderRadius,
+      opacity: style.opacity,
+      filter: style.filter,
+      objectFit: style.objectFit,
+      backgroundImage: style.backgroundImage.slice(0, 160)
+    };
+  }
+
+  function describe(node) {
+    return {
+      tag: node.tagName.toLowerCase(),
+      id: node.id || "",
+      testId: node.getAttribute("data-testid") || "",
+      role: node.getAttribute("role") || "",
+      aria: node.getAttribute("aria-label") || "",
+      text: (node.innerText || "").trim().slice(0, 220),
+      path: pathFor(node),
+      rect: box(node),
+      style: styleFor(node),
+      childCount: node.children.length,
+      imgCount: node.querySelectorAll("img").length,
+      videoCount: node.querySelectorAll("video").length,
+      src: node.currentSrc || node.src || "",
+      href: node.href || ""
+    };
+  }
+
+  const articles = Array.from(document.querySelectorAll("article"));
+  const article = articles.find((candidate) => {
+    return Array.from(candidate.querySelectorAll("a[href]"))
+      .some((link) => link.href.includes(`/status/${statusId}`));
+  }) || articles[0] || null;
+
+  const blocker = article
+    ? Array.from(article.querySelectorAll("div, span")).find((node) => {
+      return /age-restricted adult content|verify your age|to view this media/i.test(node.innerText || "");
+    })
+    : null;
+
+  const mediaNodes = article
+    ? Array.from(article.querySelectorAll('[data-testid="tweetPhoto"], [data-testid="videoPlayer"], [data-testid="placementTracking"], img, video'))
+    : [];
+
+  const blockerAncestors = [];
+  let current = blocker;
+
+  while (current && current !== article && blockerAncestors.length < 12) {
+    blockerAncestors.push(describe(current));
+    current = current.parentElement;
+  }
+
+  return {
+    label,
+    url: location.href,
+    title: document.title,
+    statusId,
+    article: article ? describe(article) : null,
+    articleText: article ? article.innerText.slice(0, 1200) : "",
+    blocker: blocker ? describe(blocker) : null,
+    blockerAncestors,
+    mediaNodes: mediaNodes.map(describe)
+  };
+}
+
 async function snapshot(label, url) {
   const target = await createTarget("about:blank");
   const client = await CDP({
@@ -94,109 +229,7 @@ async function snapshot(label, url) {
     await Page.loadEventFired().catch(() => {});
     await delay(LOAD_DELAY_MS);
 
-    const evaluated = await Runtime.evaluate({
-      returnByValue: true,
-      expression: `(() => {
-        const statusId = location.pathname.match(/\\/status\\/(\\d+)/)?.[1] || "";
-
-        function pathFor(node) {
-          const parts = [];
-          let current = node;
-
-          while (current && current.nodeType === 1 && parts.length < 14) {
-            const parent = current.parentElement;
-            const index = parent ? Array.from(parent.children).indexOf(current) + 1 : 1;
-            const testId = current.getAttribute("data-testid");
-            const id = current.id;
-            const tag = current.tagName.toLowerCase();
-            parts.unshift(id ? tag + "#" + id : testId ? tag + "[data-testid=" + testId + "]" : tag + ":nth-child(" + index + ")");
-            current = parent;
-          }
-
-          return parts.join(" > ");
-        }
-
-        function box(node) {
-          const rect = node.getBoundingClientRect();
-          return {
-            x: Math.round(rect.x),
-            y: Math.round(rect.y),
-            w: Math.round(rect.width),
-            h: Math.round(rect.height)
-          };
-        }
-
-        function styleFor(node) {
-          const style = getComputedStyle(node);
-          return {
-            display: style.display,
-            position: style.position,
-            overflow: style.overflow,
-            borderRadius: style.borderRadius,
-            opacity: style.opacity,
-            filter: style.filter,
-            objectFit: style.objectFit,
-            backgroundImage: style.backgroundImage.slice(0, 160)
-          };
-        }
-
-        function describe(node) {
-          return {
-            tag: node.tagName.toLowerCase(),
-            id: node.id || "",
-            testId: node.getAttribute("data-testid") || "",
-            role: node.getAttribute("role") || "",
-            aria: node.getAttribute("aria-label") || "",
-            text: (node.innerText || "").trim().slice(0, 220),
-            path: pathFor(node),
-            rect: box(node),
-            style: styleFor(node),
-            childCount: node.children.length,
-            imgCount: node.querySelectorAll("img").length,
-            videoCount: node.querySelectorAll("video").length,
-            src: node.currentSrc || node.src || "",
-            href: node.href || ""
-          };
-        }
-
-        const articles = Array.from(document.querySelectorAll("article"));
-        const article = articles.find((candidate) => {
-          return Array.from(candidate.querySelectorAll("a[href]")).some((link) => link.href.includes("/status/" + statusId));
-        }) || articles[0] || null;
-
-        const blocker = article
-          ? Array.from(article.querySelectorAll("div, span")).find((node) => {
-            return /age-restricted adult content|verify your age|to view this media/i.test(node.innerText || "");
-          })
-          : null;
-
-        const mediaNodes = article
-          ? Array.from(article.querySelectorAll('[data-testid="tweetPhoto"], [data-testid="videoPlayer"], [data-testid="placementTracking"], img, video'))
-          : [];
-
-        const blockerAncestors = [];
-        let current = blocker;
-
-        while (current && current !== article && blockerAncestors.length < 12) {
-          blockerAncestors.push(describe(current));
-          current = current.parentElement;
-        }
-
-        return {
-          label: ${JSON.stringify(label)},
-          url: location.href,
-          title: document.title,
-          statusId,
-          article: article ? describe(article) : null,
-          articleText: article ? article.innerText.slice(0, 1200) : "",
-          blocker: blocker ? describe(blocker) : null,
-          blockerAncestors,
-          mediaNodes: mediaNodes.map(describe)
-        };
-      })()`
-    });
-
-    return evaluated.result.value;
+    return runInPage(Runtime, snapshotPage, label);
   } finally {
     await client.close();
     await closeTarget(target.id);

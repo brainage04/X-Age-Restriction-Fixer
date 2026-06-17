@@ -26,6 +26,29 @@ async function closeTarget(id) {
   await fetch(`http://127.0.0.1:${PORT}/json/close/${id}`).catch(() => {});
 }
 
+async function evaluate(Runtime, expression) {
+  const result = await Runtime.evaluate({
+    expression,
+    awaitPromise: true,
+    returnByValue: true
+  });
+
+  if (result.exceptionDetails) {
+    throw new Error(result.exceptionDetails.text || "Runtime evaluation failed.");
+  }
+
+  return result.result.value;
+}
+
+function pageCallExpression(fn, args) {
+  const serializedArgs = args.map((arg) => JSON.stringify(arg)).join(",");
+  return `(${fn.toString()})(${serializedArgs})`;
+}
+
+async function runInPage(Runtime, fn, ...args) {
+  return evaluate(Runtime, pageCallExpression(fn, args));
+}
+
 function reloadExtensionInPage(extensionId, extensionName) {
   const manager = document.querySelector("extensions-manager");
   const list = manager?.shadowRoot?.querySelector("extensions-item-list");
@@ -84,16 +107,7 @@ async function main() {
     await Promise.all([Page.enable(), Runtime.enable()]);
     await delay(LOAD_DELAY_MS);
 
-    const result = await Runtime.evaluate({
-      returnByValue: true,
-      expression: `(${reloadExtensionInPage.toString()})(${JSON.stringify(EXTENSION_ID)}, ${JSON.stringify(EXTENSION_NAME)})`
-    });
-
-    if (result.exceptionDetails) {
-      throw new Error(result.exceptionDetails.text || "Failed to evaluate extension reload script");
-    }
-
-    const reloadResult = result.result.value;
+    const reloadResult = await runInPage(Runtime, reloadExtensionInPage, EXTENSION_ID, EXTENSION_NAME);
 
     if (!reloadResult?.ok) {
       console.error(JSON.stringify(reloadResult, null, 2));
